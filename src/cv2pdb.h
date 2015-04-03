@@ -125,7 +125,7 @@ public:
 	void appendGlobalVar(const char* name, int type, int seg, int offset);
 	bool appendEndArg();
 	void appendEnd();
-	void appendLexicalBlock(DWARF_InfoData& id, unsigned int proclo);
+    void appendLexicalBlock(unsigned pclo, unsigned pchi);
 
 	bool hasClassTypeEnum(const codeview_type* fieldlist);
 	bool insertClassTypeEnums();
@@ -169,6 +169,7 @@ public:
 
 	bool addDWARFSectionContrib(mspdb::Mod* mod, unsigned long pclo, unsigned long pchi);
 	bool addDWARFProc(DWARF_InfoData& id, DWARF_CompilationUnit* cu, DIECursor cursor);
+    bool addLexicalBlocks(DWARF_CompilationUnit* cu, DIECursor cursor, Location frameBase);
 	int  addDWARFStructure(DWARF_InfoData& id, DWARF_CompilationUnit* cu, DIECursor cursor);
 	int  addDWARFArray(DWARF_InfoData& arrayid, DWARF_CompilationUnit* cu, DIECursor cursor);
 	int  addDWARFBasicType(const char*name, int encoding, int byte_size);

@@ -170,7 +170,7 @@ void CV2PDB::appendEnd()
 	cbUdtSymbols += 4;
 }
 
-void CV2PDB::appendLexicalBlock(DWARF_InfoData& id, unsigned int proclo)
+void CV2PDB::appendLexicalBlock(unsigned pclo, unsigned pchi)
 {
 	checkUdtSymbolAlloc(32);
 
@@ -178,8 +178,8 @@ void CV2PDB::appendLexicalBlock(DWARF_InfoData& id, unsigned int proclo)
 	dsym->block_v3.id = S_BLOCK_V3;
 	dsym->block_v3.parent = 0;
 	dsym->block_v3.end = 0; // destSize + sizeof(dsym->block_v3) + 12;
-	dsym->block_v3.length = id.pchi - id.pclo;
-	dsym->block_v3.offset = id.pclo - codeSegOff;
+	dsym->block_v3.length = pchi - pclo;
+	dsym->block_v3.offset = pclo - codeSegOff;
 	dsym->block_v3.segment = img.codeSegment + 1;
 	dsym->block_v3.name[0] = 0;
 	int len = sizeof(dsym->block_v3);
@@ -242,14 +242,9 @@ bool CV2PDB::addDWARFProc(DWARF_InfoData& procid, DWARF_CompilationUnit* cu, DIE
 #endif
 
 	Location frameBase = decodeLocation(procid.frame_base);
-
 	if (cu)
 	{
-		bool endarg = false;
 		DWARF_InfoData id;
-		int off = 8;
-		int cvid;
-
 		DIECursor prev = cursor;
 		while (cursor.readSibling(id) && id.tag == DW_TAG_formal_parameter)
 		{
@@ -266,44 +261,64 @@ bool CV2PDB::addDWARFProc(DWARF_InfoData& procid, DWARF_CompilationUnit* cu, DIE
 		}
 		appendEndArg();
 
-		std::vector<DIECursor> lexicalBlocks;
-		lexicalBlocks.push_back(prev);
-
-		while (!lexicalBlocks.empty())
-		{
-			cursor = lexicalBlocks.back();
-			lexicalBlocks.pop_back();
-
-			while (cursor.readSibling(id))
-			{
-				if (id.tag == DW_TAG_lexical_block)
-				{
-					if (id.hasChild && id.pchi != id.pclo)
-					{
-						appendLexicalBlock(id, pclo + codeSegOff);
-						lexicalBlocks.push_back(cursor);
-						cursor = cursor.getSubtreeCursor();
-					}
-				}
-				else if (id.tag == DW_TAG_variable)
-				{
-					if (id.name && id.location.type == ExprLoc)
-					{
-						Location loc = decodeLocation(id.location, &frameBase);
-						if (loc.is_regrel())
-							appendStackVar(id.name, getTypeByDWARFPtr(cu, id.type), loc);
-					}
-				}
-			}
-			appendEnd();
-		}
+        addLexicalBlocks(cu, prev, frameBase);
+        appendEnd();
 	}
 	else
 	{
 		appendEndArg();
 		appendEnd();
 	}
+
 	return true;
+}
+
+bool CV2PDB::addLexicalBlocks(DWARF_CompilationUnit* cu, DIECursor cursor, Location frameBase)
+{
+    DWARF_InfoData id;
+    while (cursor.readSibling(id))
+    {
+        if (id.tag == DW_TAG_variable)
+        {
+            if (id.name && id.location.type == ExprLoc)
+            {
+                Location loc = decodeLocation(id.location, &frameBase);
+                if (loc.is_regrel())
+                    appendStackVar(id.name, getTypeByDWARFPtr(cu, id.type), loc);
+            }
+        }
+        else if (id.tag == DW_TAG_lexical_block)
+        {
+            if (id.hasChild)
+            {
+                if (id.ranges != -1)
+                {
+                    // iterate over all code ranges
+                    unsigned char* r = (unsigned char*)img.debug_ranges + id.ranges;
+                    unsigned char* rend = (unsigned char*)img.debug_ranges + img.debug_ranges_length;
+                    while (r < rend)
+                    {
+                        unsigned long pclo = RD4(r);
+                        unsigned long pchi = RD4(r);
+                        if (pclo == 0 && pchi == 0)
+                            break;
+
+                        appendLexicalBlock(pclo, pchi);
+                        addLexicalBlocks(cu, cursor.getSubtreeCursor(), frameBase);
+                        appendEnd();
+                    }
+                }
+                else if (id.pchi != id.pclo)
+                {
+                    appendLexicalBlock(id.pclo, id.pchi);
+                    addLexicalBlocks(cu, cursor.getSubtreeCursor(), frameBase);
+                    appendEnd();
+                }
+            }
+        }
+    }
+
+    return true;
 }
 
 int CV2PDB::addDWARFStructure(DWARF_InfoData& structid, DWARF_CompilationUnit* cu, DIECursor cursor)
@@ -755,7 +770,7 @@ bool CV2PDB::createTypes()
 #if !FULL_CONTRIB
 				if (id.dir && id.name)
 				{
-					if (id.ranges > 0 && id.ranges < img.debug_ranges_length)
+					if (id.ranges != -1 && id.ranges < img.debug_ranges_length)
 					{
 						unsigned char* r = (unsigned char*)img.debug_ranges + id.ranges;
 						unsigned char* rend = (unsigned char*)img.debug_ranges + img.debug_ranges_length;
