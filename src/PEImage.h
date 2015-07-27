@@ -79,7 +79,7 @@ public:
 	int findSection(unsigned int off) const;
 	int findSymbol(const char* name, unsigned long& off) const;
 	const IMAGE_SECTION_HEADER& getSection(int s) const { return sec[s]; }
-	unsigned long long getImageBase() const { return IMGHDR(OptionalHeader.ImageBase); }
+	UINT64 getImageBase() const { return IMGHDR(OptionalHeader.ImageBase); }
 
 private:
 	int fd;

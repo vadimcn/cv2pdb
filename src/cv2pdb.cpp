@@ -35,6 +35,7 @@ CV2PDB::CV2PDB(PEImage& image)
 	cntTypedefs = 0;
 	nextUserType = 0x1000;
 	nextDwarfType = 0x1000;
+    dwarfVersion = 3;
 
 	addClassTypeEnum = true;
 	addStringViewHelper = false;

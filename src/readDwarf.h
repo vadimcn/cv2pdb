@@ -3,6 +3,7 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
 #include "mspdb.h"
 
 typedef unsigned char byte;
@@ -37,6 +38,11 @@ inline int SLEB128(byte* &p)
 		x |= -(1 << (shift + 7)); // sign extend
 	p++;
 	return x;
+}
+
+inline byte RD1(byte* &p)
+{
+    return *p++;
 }
 
 inline unsigned int RD2(byte* &p)
@@ -216,30 +222,24 @@ struct DWARF_InfoData
 	}
 };
 
-static const int maximum_operations_per_instruction = 1;
-
 struct DWARF_LineNumberProgramHeader
 {
-	unsigned int unit_length; // 12 byte in DWARF-64
-	unsigned short version;
-	unsigned int header_length; // 8 byte in DWARF-64
-	byte minimum_instruction_length;
-	//byte maximum_operations_per_instruction; (// not in DWARF 2
-	byte default_is_stmt;
-	signed char line_base;
-	byte line_range;
-	byte opcode_base;
-	//LEB128 standard_opcode_lengths[opcode_base]; 
-	// string include_directories[] // zero byte terminated
-	// DWARF_FileNames file_names[] // zero byte terminated
+    uint64_t unit_length; // 12 byte in DWARF-64
+    int version;
+    uint64_t header_length; // 8 byte in DWARF-64
+    byte minimum_instruction_length;
+    byte maximum_operations_per_instruction; (// not in DWARF 2
+    byte default_is_stmt;
+    signed char line_base;
+    byte line_range;
+    byte opcode_base;
+    std::vector<int> standard_opcode_lengths;
+    std::vector<char*> include_directories;
+    std::vector<DWARF_FileName> file_names;
 };
 
 struct DWARF_LineState
 {
-	// hdr info
-	std::vector<const char*> include_dirs;
-	std::vector<DWARF_FileName> files;
-
 	unsigned long address;
 	unsigned int  op_index;
 	unsigned int  file;
@@ -254,25 +254,25 @@ struct DWARF_LineState
 	unsigned int  discriminator;
 
 	// not part of the "documented" state
-	DWARF_FileName* file_ptr;
 	unsigned long seg_offset;
 	unsigned long last_addr;
-	std::vector<mspdb::LineInfoEntry> lineInfo;
 
-	DWARF_LineState()
-	{
-		seg_offset = 0x400000;
-		init(0);
-	}
+    struct LineInfo
+    {
+        unsigned address;
+        unsigned file;
+        unsigned line;
+    };
+    std::vector<LineInfo> lineInfo;
 
-	void init(DWARF_LineNumberProgramHeader* hdr)
+    void init(DWARF_LineNumberProgramHeader& hdr)
 	{
 		address = 0;
 		op_index = 0;
 		file = 1;
 		line = 1;
 		column = 0;
-		is_stmt = hdr && hdr->default_is_stmt != 0;
+		is_stmt = hdr.default_is_stmt != 0;
 		basic_block = false;
 		end_sequence = false;
 		prologue_end = false;
@@ -281,23 +281,18 @@ struct DWARF_LineState
 		discriminator = 0;
 	}
 
-	void advance_addr(DWARF_LineNumberProgramHeader* hdr, int operation_advance)
+    void advance_addr(DWARF_LineNumberProgramHeader& hdr, int operation_advance)
 	{
-		int address_advance = hdr->minimum_instruction_length * ((op_index + operation_advance) / maximum_operations_per_instruction);
+		int address_advance = hdr.minimum_instruction_length * ((op_index + operation_advance) / hdr.maximum_operations_per_instruction);
 		address += address_advance;
-		op_index = (op_index + operation_advance) % maximum_operations_per_instruction;
+        op_index = (op_index + operation_advance) % hdr.maximum_operations_per_instruction;
 	}
 
 	void addLineInfo()
 	{
-#if 0
-		const char* fname = (file == 0 ? file_ptr->file_name : files[file - 1].file_name);
-		printf("Adr:%08x Line: %5d File: %s\n", address, line, fname);
-#endif
-		if (address < seg_offset)
-			return;
-		mspdb::LineInfoEntry entry;
-		entry.offset = address - seg_offset;
+        LineInfo entry;
+        entry.address = address;
+        entry.file = file;
 		entry.line = line;
 		lineInfo.push_back(entry);
 	}

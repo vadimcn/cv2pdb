@@ -947,8 +947,11 @@ static int cmpAdr(const void* s1, const void* s2)
 	return e1->offset - e2->offset;
 }
 
-bool _flushDWARFLines(CV2PDB* cv2pdb, DWARF_LineState& state)
+bool _flushDWARFLines(CV2PDB* cv2pdb, DWARF_LineNumberProgramHeader& hdr, DWARF_LineState& state)
 {
+    //if (!strcmp(hdr.file_names[0].file_name, "loop.rs"))
+    //    __debugbreak();
+
 	if(state.lineInfo.size() == 0)
 		return true;
 
@@ -967,18 +970,16 @@ bool _flushDWARFLines(CV2PDB* cv2pdb, DWARF_LineState& state)
 //        return true;
 
 	const DWARF_FileName* dfn;
-	if(state.file == 0)
-		dfn = state.file_ptr;
-	else if(state.file > 0 && state.file <= state.files.size())
-		dfn = &state.files[state.file - 1];
+	if(state.file > 0 && state.file <= hdr.file_names.size())
+        dfn = &hdr.file_names[state.file - 1];
 	else
 		return false;
 	std::string fname = dfn->file_name;
 	
 	if(isRelativePath(fname) && 
-	   dfn->dir_index > 0 && dfn->dir_index <= state.include_dirs.size())
+        dfn->dir_index > 0 && dfn->dir_index <= hdr.include_directories.size())
 	{
-		std::string dir = state.include_dirs[dfn->dir_index - 1];
+        std::string dir = hdr.include_directories[dfn->dir_index - 1];
 		if(dir.length() > 0 && dir[dir.length() - 1] != '/' && dir[dir.length() - 1] != '\\')
 			dir.append("\\");
 		fname = dir + fname;
@@ -1047,58 +1048,65 @@ bool CV2PDB::addDWARFLines()
 		return setError("no .debug_line section found");
 
 	mspdb::Mod* mod = globalMod();
-	for(unsigned long off = 0; off < img.debug_line_length; )
+	for (uint64_t off = 0; off < img.debug_line_length; )
 	{
-		DWARF_LineNumberProgramHeader* hdr = (DWARF_LineNumberProgramHeader*) (img.debug_line + off);
-		int length = hdr->unit_length;
-		if(length < 0)
+        DWARF_LineNumberProgramHeader hdr;
+        byte* p = (byte*)(img.debug_line + off);
+		
+        hdr.unit_length = RD4(p); // 12 byte in DWARF-64
+        byte* end = p + hdr.unit_length; // end of line number info
+        hdr.version = RD2(p);
+        hdr.header_length = RD4(p); // 8 byte in DWARF-64
+        byte* start = p + hdr.header_length; // start of line number info
+        hdr.minimum_instruction_length = RD1(p);
+        if (this->dwarfVersion >= 4) // new in DWARF4
+            hdr.maximum_operations_per_instruction = RD1(p);
+        else
+            hdr.maximum_operations_per_instruction = 1;
+        hdr.default_is_stmt = RD1(p);
+        hdr.line_base = RD1(p);
+        hdr.line_range = RD1(p);
+        hdr.opcode_base = RD1(p);
+
+        hdr.standard_opcode_lengths.resize(hdr.opcode_base);
+        for (int o = 1; o < hdr.opcode_base; o++)
+            hdr.standard_opcode_lengths[o] = LEB128(p);
+        // dirs
+        while (*p != 0)
+        {
+            hdr.include_directories.push_back((char*)p);
+            p += strlen((const char*)p) + 1;
+        }
+        ++p;
+        // files
+        DWARF_FileName fname;
+        while (*p)
+        {
+            fname.read(p);
+            hdr.file_names.push_back(fname);
+        }
+        ++p;
+
+        assert(p == start); // p should be positioned at the end of the header
+
+        if (hdr.unit_length >= 0xfffffff0)
 			break;
-		length += sizeof(length);
-
-		unsigned char* p = (unsigned char*) (hdr + 1);
-		unsigned char* end = (unsigned char*) hdr + length;
-
-		std::vector<unsigned int> opcode_lengths;
-		opcode_lengths.resize(hdr->opcode_base);
-		opcode_lengths[0] = 0;
-		for(int o = 1; o < hdr->opcode_base && p < end; o++)
-			opcode_lengths[o] = LEB128(p);
 
 		DWARF_LineState state;
-		state.seg_offset = img.getImageBase() + img.getSection(img.codeSegment).VirtualAddress;
-
-		// dirs
-		while(p < end)
-		{
-			if(*p == 0)
-				break;
-			state.include_dirs.push_back((const char*) p);
-			p += strlen((const char*) p) + 1;
-		}
-		p++;
-
-		// files
-		DWARF_FileName fname;
-		while(p < end && *p)
-		{
-			fname.read(p);
-			state.files.push_back(fname);
-		}
-		p++;
+        state.init(hdr);
+        state.seg_offset = img.getImageBase() + img.getSection(img.codeSegment).VirtualAddress;
 
 		std::vector<mspdb::LineInfoEntry> lineInfo;
-
-		state.init(hdr);
-		while(p < end)
+		while (p < end)
 		{
 			int opcode = *p++;
-			if(opcode >= hdr->opcode_base)
+			if (opcode >= hdr.opcode_base)
 			{
 				// special opcode
-				int adjusted_opcode = opcode - hdr->opcode_base;
-				int operation_advance = adjusted_opcode / hdr->line_range;
+				int adjusted_opcode = opcode - hdr.opcode_base;
+				int operation_advance = adjusted_opcode / hdr.line_range;
 				state.advance_addr(hdr, operation_advance);
-				int line_advance = hdr->line_base + (adjusted_opcode % hdr->line_range);
+				int line_advance = hdr.line_base + (adjusted_opcode % hdr.line_range);
 				state.line += line_advance;
 
 				state.addLineInfo();
@@ -1125,8 +1133,6 @@ bool CV2PDB::addDWARFLines()
 							state.end_sequence = true;
 							state.last_addr = state.address;
 							state.addLineInfo();
-							if(!_flushDWARFLines(this, state))
-								return setError("cannot add line number info to module");
 							state.init(hdr);
 							break;
 						case DW_LNE_set_address:
@@ -1138,8 +1144,7 @@ bool CV2PDB::addDWARFLines()
 							break;
 						case DW_LNE_define_file:
 							fname.read(p);
-							state.file_ptr = &fname;
-							state.file = 0;
+                            hdr.file_names.push_back(fname);
 							break;
 						case DW_LNE_set_discriminator:
 							state.discriminator = LEB128(p);
@@ -1162,8 +1167,6 @@ bool CV2PDB::addDWARFLines()
 					state.line += SLEB128(p);
 					break;
 				case DW_LNS_set_file:
-					if(!_flushDWARFLines(this, state))
-						return setError("cannot add line number info to module");
 					state.file = LEB128(p);
 					break;
 				case DW_LNS_set_column:
@@ -1176,7 +1179,7 @@ bool CV2PDB::addDWARFLines()
 					state.basic_block = true;
 					break;
 				case DW_LNS_const_add_pc:
-					state.advance_addr(hdr, (255 - hdr->opcode_base) / hdr->line_range);
+					state.advance_addr(hdr, (255 - hdr.opcode_base) / hdr.line_range);
 					break;
 				case DW_LNS_fixed_advance_pc:
 					state.address += RD2(p);
@@ -1193,16 +1196,17 @@ bool CV2PDB::addDWARFLines()
 					break;
 				default:
 					// unknown standard opcode
-					for(unsigned int arg = 0; arg < opcode_lengths[opcode]; arg++)
+					for(int arg = 0; arg < hdr.standard_opcode_lengths[opcode]; arg++)
 						LEB128(p);
 					break;
 				}
 			}
 		}
-		if(!_flushDWARFLines(this, state))
+
+		if (!_flushDWARFLines(this, hdr, state))
 			return setError("cannot add line number info to module");
 
-		off += length;
+        off = end - (byte*)img.debug_line;
 	}
 
 	return true;

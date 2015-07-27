@@ -257,6 +257,7 @@ public:
 	double Dversion;
 
 	// DWARF
+    int dwarfVersion;
 	int codeSegOff;
 	std::unordered_map<byte*, int> mapOffsetToType;
 };
